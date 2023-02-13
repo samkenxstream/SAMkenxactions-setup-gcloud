@@ -18,16 +18,17 @@ import * as core from '@actions/core';
 import * as toolCache from '@actions/tool-cache';
 import {
   authenticateGcloudSDK,
-  getLatestGcloudSDKVersion,
+  bestVersion,
   installComponent,
   installGcloudSDK,
-  isInstalled,
   setProject,
 } from '@google-github-actions/setup-cloud-sdk';
 import {
   errorMessage,
   isPinnedToHead,
   pinnedToHeadWarning,
+  parseBoolean,
+  presence,
 } from '@google-github-actions/actions-utils';
 import path from 'path';
 
@@ -49,21 +50,49 @@ export async function run(): Promise<void> {
   }
 
   try {
-    let version = core.getInput('version');
-    if (!version || version == 'latest') {
-      version = await getLatestGcloudSDKVersion();
-    }
+    const skipInstall = parseBoolean(core.getInput('skip_install'));
+    let version = presence(core.getInput('version'));
+    const components = core.getInput('install_components');
+    const projectId = core.getInput('project_id');
 
-    // Install the gcloud if not already present
-    if (!isInstalled(version)) {
-      await installGcloudSDK(version);
+    if (skipInstall) {
+      core.info(`Skipping installation ("skip_install" was true)`);
+      if (version) {
+        core.warning(`Ignoring "version" because "skip_install" was true!`);
+      }
+
+      if (components) {
+        core.warning(
+          `Installing custom components with the system-provided gcloud may fail. ` +
+            `Set "skip_install" to false to install a managed version.`,
+        );
+      }
     } else {
+      // Compute the version information. If the version was not specified,
+      // accept any installed version. If the version was specified as "latest",
+      // compute the latest version. Otherwise, accept the version/version
+      // constraint as-is.
+      if (!version) {
+        core.debug(`version was unset, defaulting to any version`);
+        version = '> 0.0.0';
+      }
+      if (version === 'latest') {
+        core.debug(`resolving latest version`);
+        version = await bestVersion('> 0.0.0');
+        core.debug(`resolved latest version to ${version}`);
+      }
+
+      // Install the gcloud if not already present
       const toolPath = toolCache.find('gcloud', version);
-      core.addPath(path.join(toolPath, 'bin'));
+      if (toolPath !== '') {
+        core.addPath(path.join(toolPath, 'bin'));
+      } else {
+        core.debug(`no version of gcloud matching "${version}" is installed`);
+        await installGcloudSDK(version);
+      }
     }
 
     // Install additional components
-    const components = core.getInput('install_components');
     if (components) {
       await installComponent(components.split(',').map((comp) => comp.trim()));
     }
@@ -80,7 +109,6 @@ export async function run(): Promise<void> {
     }
 
     // Set the project ID, if given.
-    const projectId = core.getInput('project_id');
     if (projectId) {
       await setProject(projectId);
       core.info('Successfully set default project');
